@@ -41,6 +41,7 @@ from ._checks.providers import (
 from ._checks.stores import (
     _all_pages_for_reconciliation,
     _decision_vector_ids,
+    _index_data_row,
     _is_stub_fallback_row,
     store_checks,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "_decision_vector_ids",
     "_distill_checks",
     "_events_config_check",
+    "_index_data_row",
     "_is_stub_fallback_row",
     "_mcp_responds_check",
     "_page_count",

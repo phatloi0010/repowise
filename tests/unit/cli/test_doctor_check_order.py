@@ -155,6 +155,7 @@ HEALTHY_ORDER = [
     "<provider>",
     "Hosted account",
     "Stale pages",
+    "Index data",
     "SQL ↔ Vector Store",
     "SQL ↔ FTS Index",
     "Coordinator drift",
@@ -337,12 +338,12 @@ def test_table_healthy_prints_table_stamp_then_pass(env, tmp_path) -> None:
     repo = asyncio.run(_build(tmp_path))
     ok, _ = repo_checks._run_repo_checks(repo, repair=False)
     assert ok is True
-    # The fixture's store predates a capability, so the store-format row warns;
+    # The fixture's store is unstamped, so store-format and index-data warn;
     # a warn still passes and is counted on the summary line.
     texts = _texts(env)
     assert texts[:2] == ["<table>", "<stamp>"]
     assert texts[2].startswith("[bold green]All checks passed[/bold green]")
-    assert "1 warning(s)" in texts[2]
+    assert "2 warning(s)" in texts[2]
     assert len(texts) == 3
 
 

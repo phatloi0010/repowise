@@ -13,6 +13,99 @@ from .._types import DoctorCheck, _check
 from .context import CheckContext, StoreDrift, open_store
 
 _REPAIR = "repowise doctor --repair"
+_INDEX_ONLY_UPDATE = "repowise update --index-only"
+
+
+async def _empty_git_tables(repo_path: _DoctorPath, git_tier: str) -> list[str]:
+    """Git tables expected at *git_tier* that hold no rows for *repo_path*."""
+    from sqlalchemy import func, select
+
+    from repowise.core.ingestion.git_indexer.tiers import GitIndexTier
+    from repowise.core.persistence import get_repository_by_path, get_session
+    from repowise.core.persistence.models import (
+        GitCommit,
+        GitCommitFile,
+        GitFunctionBlame,
+        GitMetadata,
+    )
+
+    models: list[type] = [GitMetadata, GitCommit, GitCommitFile]
+    with contextlib.suppress(ValueError):
+        if GitIndexTier(git_tier).includes_function_blame:
+            models.append(GitFunctionBlame)
+
+    engine, sf = await open_store(repo_path)
+    try:
+        async with get_session(sf) as session:
+            repo = await get_repository_by_path(session, str(repo_path))
+            empty: list[str] = []
+            for model in models:
+                stmt = select(func.count()).select_from(model)
+                if repo is not None:
+                    stmt = stmt.where(model.repository_id == repo.id)  # type: ignore[attr-defined]
+                count = (await session.execute(stmt)).scalar_one()
+                if not int(count):
+                    empty.append(model.__tablename__)  # type: ignore[attr-defined]
+            return empty
+    finally:
+        await engine.dispose()
+
+
+def _index_data_row(ctx: CheckContext) -> DoctorCheck:
+    """Whether stored git rows and analyzer stamps match the current build.
+
+    Cheap enough to run under ``--quick``: reads ``state.json`` stamps in
+    memory and, when ``git_tier`` is set, runs ``count(*)`` on the git tables.
+    """
+    from repowise.cli.commands.update_cmd.persistence import (
+        health_analyzer_changed,
+        security_scanner_changed,
+    )
+    from repowise.cli.helpers import db_configured, load_state
+    from repowise.core.ingestion.git_indexer._constants import (
+        GIT_HISTORY_BACKFILL_REWALK,
+        GIT_HISTORY_VERSION_KEY,
+        git_history_stale,
+    )
+
+    name, check_id = "Index data", "index-data"
+    try:
+        state = ctx.state if ctx.state else load_state(ctx.repo_path)
+        stale: list[str] = []
+        if git_history_stale(state):
+            if state.get(GIT_HISTORY_VERSION_KEY) == GIT_HISTORY_BACKFILL_REWALK:
+                stale.append("git history (attribution backfill)")
+            else:
+                stale.append("git history (older rules)")
+        if health_analyzer_changed(state):
+            stale.append("health scores (older analyzer)")
+        if security_scanner_changed(state):
+            stale.append("security findings (older scanner)")
+        git_tier = state.get("git_tier")
+        has_db = ctx.db_ok or (ctx.repowise_dir / "wiki.db").exists() or db_configured()
+        if isinstance(git_tier, str) and git_tier and has_db:
+            empty_tables = run_async(_empty_git_tables(ctx.repo_path, git_tier))
+            if empty_tables:
+                stale.append(f"missing git data ({', '.join(empty_tables)} empty)")
+        if not stale:
+            return _check(name, True, "Current", check_id=check_id)
+        detail = f"{'; '.join(stale)} (run: {_INDEX_ONLY_UPDATE})"
+        return _check(
+            name,
+            True,
+            detail,
+            check_id=check_id,
+            warn=True,
+            fix=_INDEX_ONLY_UPDATE,
+        )
+    except Exception as exc:
+        return _check(
+            name,
+            True,
+            f"Could not check: {exc}",
+            check_id=check_id,
+            warn=True,
+        )
 
 
 async def _decision_vector_ids(session, repository_id: str) -> set[str]:
@@ -380,6 +473,8 @@ def _coordinator_row(ctx: CheckContext) -> DoctorCheck:
 def store_checks(ctx: CheckContext) -> list[DoctorCheck]:
     """Checks 8-10, in order. Fills ``ctx.drift`` and the drift highlight."""
     checks: list[DoctorCheck] = []
+    if ctx.db_ok and ctx.state_ok:
+        checks.append(_index_data_row(ctx))
     if ctx.quick:
         return checks
     if ctx.db_ok and ctx.page_count > 0:
